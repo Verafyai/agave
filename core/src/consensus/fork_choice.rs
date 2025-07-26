@@ -395,18 +395,7 @@ fn can_vote_on_candidate_bank(
     }
 }
 
-/// Given a `heaviest_bank` and a `heaviest_bank_on_same_voted_fork`, return
-/// a bank to vote on, a bank to reset to, and a list of switch failure
-/// reasons.
-///
-/// If `heaviest_bank_on_same_voted_fork` is `None` due to that fork no
-/// longer being valid to vote on, it's possible that a validator will not
-/// be able to reset away from the invalid fork that they last voted on. To
-/// resolve this scenario, validators need to wait until they can create a
-/// switch proof for another fork or until the invalid fork is marked
-/// valid again if it was confirmed by the cluster.
-/// Until this is resolved, leaders will build each of their
-/// blocks from the last reset bank on the invalid fork.
+
 pub fn select_vote_and_reset_forks(
     heaviest_bank: &Arc<Bank>,
     // Should only be None if there was no previous vote
@@ -418,19 +407,6 @@ pub fn select_vote_and_reset_forks(
     latest_validator_votes_for_frozen_banks: &LatestValidatorVotesForFrozenBanks,
     fork_choice: &HeaviestSubtreeForkChoice,
 ) -> SelectVoteAndResetForkResult {
-    // Try to vote on the actual heaviest fork. If the heaviest bank is
-    // locked out or fails the threshold check, the validator will:
-    // 1) Not continue to vote on current fork, waiting for lockouts to expire/
-    //    threshold check to pass
-    // 2) Will reset PoH to heaviest fork in order to make sure the heaviest
-    //    fork is propagated
-    // This above behavior should ensure correct voting and resetting PoH
-    // behavior under all cases:
-    // 1) The best "selected" bank is on same fork
-    // 2) The best "selected" bank is on a different fork,
-    //    switch_threshold fails
-    // 3) The best "selected" bank is on a different fork,
-    //    switch_threshold succeeds
     let initial_switch_fork_decision: SwitchForkDecision = tower.check_switch_threshold(
         heaviest_bank.slot(),
         ancestors,
@@ -459,13 +435,50 @@ pub fn select_vote_and_reset_forks(
     );
 
     let Some(candidate_vote_bank) = candidate_vote_bank else {
-        // No viable candidate to vote on.
         return SelectVoteAndResetForkResult {
             vote_bank: None,
             reset_bank: reset_bank.cloned(),
             heaviest_fork_failures: failure_reasons,
         };
     };
+
+    // === 🛡️ Mostly Confirmed Threshold Check ===
+    let slot = candidate_vote_bank.slot();
+    let voted_stake = progress
+        .get(&slot)
+        .map(|p| p.fork_stats.fork_stake)
+        .unwrap_or(0);
+    let total_stake = progress
+        .get(&slot)
+        .map(|p| p.fork_stats.total_stake)
+        .unwrap_or(1); // avoid div by zero
+    let confirmation_ratio = voted_stake as f64 / total_stake as f64;
+
+    if confirmation_ratio < 0.55 {
+        use solana_metrics::datapoint_info;
+        info!(
+            "⏸ Skipping vote on slot {} — only {:.2}% stake confirmed (threshold: 55%)",
+            slot,
+            confirmation_ratio * 100.0
+        );
+        datapoint_info!(
+            "mostly_confirmed_skip",
+            ("slot", slot, i64),
+            ("confirmation_ratio", confirmation_ratio, f64)
+        );
+        failure_reasons.push(HeaviestForkFailures::FailedThreshold(
+            slot,
+            0, // vote depth unknown for this mod
+            voted_stake,
+            total_stake,
+        ));
+
+        return SelectVoteAndResetForkResult {
+            vote_bank: None,
+            reset_bank: reset_bank.cloned(),
+            heaviest_fork_failures: failure_reasons,
+        };
+    }
 
     if can_vote_on_candidate_bank(
         candidate_vote_bank.slot(),
@@ -474,14 +487,12 @@ pub fn select_vote_and_reset_forks(
         &mut failure_reasons,
         &switch_fork_decision,
     ) {
-        // We can vote!
         SelectVoteAndResetForkResult {
             vote_bank: Some((candidate_vote_bank.clone(), switch_fork_decision)),
             reset_bank: Some(candidate_vote_bank.clone()),
             heaviest_fork_failures: failure_reasons,
         }
     } else {
-        // Unable to vote on the candidate bank.
         SelectVoteAndResetForkResult {
             vote_bank: None,
             reset_bank: reset_bank.cloned(),
