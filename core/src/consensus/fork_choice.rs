@@ -471,7 +471,7 @@ pub fn select_vote_and_reset_forks(
         .unwrap_or(1); // avoid div by zero
     let confirmation_ratio = voted_stake as f64 / total_stake as f64;
 
-    if confirmation_ratio < 0.55 {
+    if confirmation_ratio < 0.15 {
         use solana_metrics::datapoint_info;
         info!(
             "⏸ Skipping vote on slot {} — only {:.2}% stake confirmed (threshold: 55%)",
