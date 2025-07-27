@@ -8,8 +8,8 @@ use {
         },
         replay_stage::HeaviestForkFailures,
     },
-    solana_clock::Slot,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
+    solana_sdk::clock::Slot,
     std::{
         collections::{HashMap, HashSet},
         sync::{Arc, RwLock},
@@ -144,10 +144,16 @@ fn recheck_fork_decision_failed_switch_threshold(
     // then there will be no blocks to include the votes for slot 4, and the network halts
     // because 90% of validators can't vote
     info!(
-        "Waiting to switch vote to {heaviest_bank_slot}, resetting to slot {:?} for now, switch \
-         proof stake: {switch_proof_stake}, threshold stake: {}, total stake: {total_stake}",
+        "Waiting to switch vote to {},
+        resetting to slot {:?} for now,
+        switch proof stake: {},
+        threshold stake: {},
+        total stake: {}",
+        heaviest_bank_slot,
         reset_bank.as_ref().map(|b| b.slot()),
+        switch_proof_stake,
         total_stake as f64 * SWITCH_FORK_THRESHOLD,
+        total_stake
     );
     failure_reasons.push(HeaviestForkFailures::FailedSwitchThreshold(
         heaviest_bank_slot,
@@ -395,7 +401,18 @@ fn can_vote_on_candidate_bank(
     }
 }
 
-
+/// Given a `heaviest_bank` and a `heaviest_bank_on_same_voted_fork`, return
+/// a bank to vote on, a bank to reset to, and a list of switch failure
+/// reasons.
+///
+/// If `heaviest_bank_on_same_voted_fork` is `None` due to that fork no
+/// longer being valid to vote on, it's possible that a validator will not
+/// be able to reset away from the invalid fork that they last voted on. To
+/// resolve this scenario, validators need to wait until they can create a
+/// switch proof for another fork or until the invalid fork is marked
+/// valid again if it was confirmed by the cluster.
+/// Until this is resolved, leaders will build each of their
+/// blocks from the last reset bank on the invalid fork.
 pub fn select_vote_and_reset_forks(
     heaviest_bank: &Arc<Bank>,
     // Should only be None if there was no previous vote
